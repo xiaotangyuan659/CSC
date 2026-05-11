@@ -1,0 +1,17 @@
+# 忽略数据
+data/
+
+# 忽略模型权重输出
+out/
+
+# 忽略缓存文件
+__pycache__/
+.ipynb_checkpoints/
+
+# 忽略日志文件
+*.log
+debug_output.txt
+
+# 忽略一些 office 临时文件（如果你打开了文档，会生成这些）
+~$*.docx
+~$*.pptx
