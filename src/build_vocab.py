@@ -1,3 +1,4 @@
+#构建字级别的词表
 import os
 import json
 from collections import Counter

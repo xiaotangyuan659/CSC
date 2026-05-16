@@ -1,170 +1,76 @@
-"""
-测试 NanoLlama 是否能从零开始生成完整句子
-"""
 import sys
 import os
+import torch
+
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-import torch
-from model import NanoLlama
 from config import NanoLlamaConfig
-from dataset import Tokenizer
-
+from model import NanoLlama
+from dataset import Tokenizer 
 
 @torch.no_grad()
-def generate_sentence(
-    model,
-    tokenizer,
-    prompt: str = "",
-    max_new_tokens: int = 100,
-    temperature: float = 0.8,
-    top_k: int = 20,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
-):
-    """
-    从给定 prompt 开始生成句子
-
-    Args:
-        prompt: 输入提示词（空字符串则从 BOS 开始，即纯自由生成）
-        max_new_tokens: 最大生成 token 数
-        temperature: 采样温度（越小越确定，越大越多样）
-        top_k: top-k 采样
-    """
-    model.eval()
-
-    # 构造输入
-    if prompt:
-        input_ids = [tokenizer.bos_token_id] + tokenizer.encode(prompt)
-    else:
-        # 纯自由生成：从 BOS 开始
-        input_ids = [tokenizer.bos_token_id]
-
-    print(f"\n[Prompt] {repr(prompt) if prompt else '(空，从 BOS 开始)'}")
-    print(f"[Input IDs] {input_ids[:20]}...")
-
-    generated = input_ids.copy()
-    input_tensor = torch.tensor([input_ids], dtype=torch.long).to(device)
-
-    for _ in range(max_new_tokens):
-        # 上下文截断：不超过 block_size
-        input_cond = (
-            input_tensor
-            if input_tensor.size(1) <= model.config.block_size
-            else input_tensor[:, -model.config.block_size:]
-        )
-
-        # 前向传播
-        logits, _ = model(input_cond)
-        logits = logits[:, -1, :]  # 只取最后一个 token 的 logits
-
-        # Temperature 采样
-        logits = logits / temperature
-
-        # Top-k 过滤
-        if top_k > 0:
-            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            logits[logits < v[:, [-1]]] = float('-inf')
-
-        # 转概率采样
-        probs = torch.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1).item()
-
-        generated.append(next_token)
-        input_tensor = torch.cat([
-            input_tensor,
-            torch.tensor([[next_token]]).to(device)
-        ], dim=1)
-
-        # 遇到 EOS 停止
-        if next_token == tokenizer.eos_token_id:
-            print(f"[Stop] 遇到 EOS token (id={next_token})")
-            break
-
-    # 解码（跳过特殊 token）
-    result = tokenizer.decode(generated, skip_special_tokens=True)
-    return result, generated
-
-
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"使用设备: {device}")
-
-    # 初始化 tokenizer
-    tokenizer = Tokenizer(r"D:\大三下课程\NLP\CSC\src\vocab.txt")
-
-    # 初始化模型结构（必须和训练时完全一致）
-    # train.py 用的是 config.py 里的 NanoLlamaConfig 默认值
+def correct_sentence():
     config = NanoLlamaConfig()
+    device = config.device
+    tokenizer = Tokenizer(config.vocab_path)
+    
+    sft_model_path = r"out_sft\nanollama_sft_epoch_3.pt" 
+    
     model = NanoLlama(config).to(device)
+    if os.path.exists(sft_model_path):
+        checkpoint = torch.load(sft_model_path, map_location=device, weights_only=False)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        model.eval()
+        print("模型加载成功！\n")
+    else:
+        print(f"找不到权重文件：{sft_model_path}")
+        return
 
-    # 加载训练好的权重
-    ckpt_path = r"D:\大三下课程\NLP\CSC\out\nanollama_epoch_5.pt"
-    print(f"加载权重: {ckpt_path}")
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    # ==========================================
+    # 关键修复 1：务必加上句号，对齐训练数据分布！
+    # ==========================================
+    error_type = "形近错字" 
+    source_text = "令天天气很好。" # <-- 注意这里的句号！
+    
+    prompt_text = (
+        f"任务：中文拼写纠错\n"
+        f"错误类型：{error_type}\n"
+        f"请纠正句子中的错误：{source_text}"
+    )
+    
+    print("-" * 50)
+    print(f"[输入给模型的严格 Prompt]:\n{prompt_text}")
+    print("-" * 50)
 
-    print(f"\nCheckpoint 信息:")
-    print(f"  epoch: {checkpoint.get('epoch', 'N/A')}")
-    print(f"  train_loss: {checkpoint.get('train_loss', 'N/A'):.4f}")
-    print(f"  metrics: {checkpoint.get('metrics', {})}")
-    print(f"\n模型参数量: {model.get_num_params() / 1e6:.2f} M")
-
-    model.eval()
-
-    # ========== 测试 1: 纯自由生成（从 BOS 开始）==========
-    print("\n" + "=" * 60)
-    print("测试 1: 纯自由生成（从 BOS 开始）")
-    print("=" * 60)
-    for i in range(3):
-        print(f"\n--- 尝试 {i+1} ---")
-        result, tokens = generate_sentence(
-            model, tokenizer,
-            prompt="",          # 空 prompt，纯自由生成
-            max_new_tokens=50,
-            temperature=0.8,
-            top_k=20,
-            device=device
-        )
-        print(f"[生成结果] {result}")
-
-    # ========== 测试 2: 带 prompt 生成（续写）==========
-    print("\n" + "=" * 60)
-    print("测试 2: 带 prompt 生成（续写句子）")
-    print("=" * 60)
-
-    prompts = [
-        "今天天气",
-        "纠错:今天心情很hao",
-        "纠错(形近错字):这扁",
-    ]
-
-    for p in prompts:
-        print(f"\n--- Prompt: {repr(p)} ---")
-        result, tokens = generate_sentence(
-            model, tokenizer,
-            prompt=p,
-            max_new_tokens=60,
-            temperature=0.8,
-            top_k=20,
-            device=device
-        )
-        print(f"[生成结果] {result}")
-
-    # ========== 测试 3: 不同 temperature 对比 ==========
-    print("\n" + "=" * 60)
-    print("测试 3: 不同 temperature 对比（prompt: '今天天气'）")
-    print("=" * 60)
-    for temp in [0.5, 1.0, 1.5]:
-        result, _ = generate_sentence(
-            model, tokenizer,
-            prompt="今天天气",
-            max_new_tokens=30,
-            temperature=temp,
-            top_k=20,
-            device=device
-        )
-        print(f"[temp={temp}] {result}")
-
+    input_ids = tokenizer.encode(prompt_text, add_special_tokens=True)
+    prompt_len = len(input_ids)
+    tokens = torch.tensor([input_ids], dtype=torch.long).to(device)
+    
+    max_new_tokens = 64
+    generated_ids = []
+    
+    for _ in range(max_new_tokens):
+        logits, _ = model(tokens, targets=None, confusion_weights=None)
+        next_token_logits = logits[:, -1, :]
+        
+        # 强制屏蔽特殊 Token
+        next_token_logits[0, tokenizer.bos_token_id] = -float('inf')
+        next_token_logits[0, tokenizer.pad_token_id] = -float('inf')
+        next_token_logits[0, tokenizer.unk_token_id] = -float('inf')
+        
+        # ==========================================
+        # 关键修复 2：去掉重复惩罚，使用最纯粹的贪心解码
+        # ==========================================
+        next_token_id = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+        
+        if next_token_id.item() == tokenizer.eos_token_id:
+            break
+            
+        generated_ids.append(next_token_id.item())
+        tokens = torch.cat([tokens, next_token_id], dim=1)
+        
+    result = tokenizer.decode(generated_ids, skip_special_tokens=True)
+    print(f"\n[模型最终纠错结果]:\n>> {result} <<\n")
 
 if __name__ == "__main__":
-    main()
+    correct_sentence()

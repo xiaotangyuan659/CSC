@@ -385,399 +385,113 @@ class PretrainDataset(Dataset):
             "attention_mask": torch.tensor(attention_mask, dtype=torch.long)
         }
         
-# =========================================================
-# Error Injector
-# =========================================================
-
-# class ErrorInjector:
-
-#     def __init__(self, config: NanoLlamaConfig):
-
-#         self.config = config
-
-#         self.confusion_sets = {}
-
-#         # =====================================
-#         # 形近字
-#         # =====================================
-
-#         if os.path.exists(config.shape_confusion_path):
-
-#             with open(
-#                 config.shape_confusion_path,
-#                 "r",
-#                 encoding="utf-8"
-#             ) as f:
-
-#                 self.confusion_sets[
-#                     "SHAPE_SIM"
-#                 ] = json.load(f)
-
-#         # =====================================
-#         # 音近字
-#         # =====================================
-
-#         if os.path.exists(config.phonetic_dir):
-
-#             phonetic_files = glob.glob(
-#                 os.path.join(
-#                     config.phonetic_dir,
-#                     "*.json"
-#                 )
-#             )
-
-#             for p_file in phonetic_files:
-
-#                 tag = os.path.basename(
-#                     p_file
-#                 ).replace(
-#                     ".json",
-#                     ""
-#                 ).upper()
-
-#                 with open(
-#                     p_file,
-#                     "r",
-#                     encoding="utf-8"
-#                 ) as f:
-
-#                     self.confusion_sets[
-#                         tag
-#                     ] = json.load(f)
-
-#         self.error_types = list(
-#             self.confusion_sets.keys()
-#         )
-
-#         print(f"混淆集加载完成: {self.error_types}")
-
-#     def inject_error(
-#         self,
-#         sentence,
-#         error_rate=None
-#     ):
-
-#         # =====================================
-#         # 使用 config 中的 error_rate
-#         # =====================================
-
-#         if error_rate is None:
-
-#             error_rate = self.config.error_rate
-
-#         chars = list(sentence)
-
-#         n = len(chars)
-
-#         if n == 0 or not self.error_types:
-#             return None
-
-#         # =====================================
-#         # 错误数量
-#         # =====================================
-
-#         num_errors = max(
-#             1,
-#             int(n * error_rate)
-#         )
-
-#         # =====================================
-#         # 随机错误位置
-#         # =====================================
-
-#         indices = random.sample(
-#             range(n),
-#             min(num_errors, n)
-#         )
-
-#         # =====================================
-#         # 随机错误类型
-#         # =====================================
-
-#         target_type = random.choice(
-#             self.error_types
-#         )
-
-#         modified_indices = []
-
-#         for idx in indices:
-
-#             orig_char = chars[idx]
-
-#             # 当前字符在混淆集里
-#             if orig_char in self.confusion_sets[target_type]:
-
-#                 candidates = self.confusion_sets[target_type][orig_char]
-
-#                 if candidates:
-
-#                     new_char = random.choice(candidates)
-
-#                     # 避免替换成自己
-#                     if new_char != orig_char:
-
-#                         chars[idx] = new_char
-
-#                         modified_indices.append(idx)
-
-#         # 没有成功注错
-#         if not modified_indices:
-#             return None
-
-#         return (
-#             target_type,
-#             "".join(chars),
-#             modified_indices
-#         )
-
 
 # =========================================================
-# Dataset
+# Instruct Dataset (专门用于带多行指令格式的微调)
 # =========================================================
 
-# class SFTDataset(Dataset):
-
-#     def __init__(
-#         self,
-#         texts,
-#         config: NanoLlamaConfig,
-#         tokenizer: Tokenizer
-#     ):
-
-#         self.texts = texts
-
-#         self.config = config
-
-#         self.tokenizer = tokenizer
-
-#         self.injector = ErrorInjector(config)
-
-#     def __len__(self):
-
-#         return len(self.texts)
-
-#     def __getitem__(self, idx):
-
-#         clean_text = self.texts[idx]
-
-#         # =================================================
-#         # 负样本控制
-#         # 一部分句子不注错
-#         # =================================================
-
-#         if random.random() < self.config.no_error_ratio:
-
-#             result = None
-
-#         else:
-
-#             result = self.injector.inject_error(
-#                 clean_text,
-#                 error_rate=self.config.error_rate
-#             )
-
-#         # =================================================
-#         # 构造 prompt / target
-#         # =================================================
-
-#         if result:
-
-#             (
-#                 error_type,
-#                 error_text,
-#                 modified_indices
-#             ) = result
-
-#             # =============================================
-#             # instruction tuning
-#             # =============================================
-
-#             instruction = f"纠错({error_type}):"
-
-#             prompt_text = (
-#                 instruction + error_text
-#             )
-
-#             target_text = clean_text
-
-#             source_text = error_text
-
-#         else:
-
-#             modified_indices = []
-
-#             prompt_text = (
-#                 f"纠错:{clean_text}"
-#             )
-
-#             target_text = clean_text
-
-#             source_text = clean_text
-
-#         # =================================================
-#         # Tokenize
-#         # =================================================
-
-#         # prompt
-#         prompt_ids = self.tokenizer.encode(
-#             prompt_text,
-#             add_special_tokens=True
-#         )
-
-#         prompt_len = len(prompt_ids)
-
-#         # target
-#         target_ids = self.tokenizer.encode(
-#             target_text,
-#             add_special_tokens=False
-#         )
-
-#         target_ids += [
-#             self.tokenizer.eos_token_id
-#         ]
-
-#         # source
-#         source_ids = self.tokenizer.encode(
-#             source_text,
-#             add_special_tokens=False
-#         )
-
-#         source_ids += [
-#             self.tokenizer.eos_token_id
-#         ]
-
-#         # =================================================
-#         # input_ids
-#         # 截断策略: 保留 [BOS] + prompt + target，确保 target 尾部有 EOS
-#         # =================================================
-
-#         max_target_len = self.config.block_size - prompt_len - 1
-
-#         if max_target_len < 1:
-#             input_ids = prompt_ids[:self.config.block_size]
-#             actual_len = len(input_ids)
-#         else:
-#             target_ids_trunc = target_ids[:max_target_len]
-
-#             full_ids = prompt_ids + target_ids_trunc
-
-#             input_ids = full_ids[:self.config.block_size]
-
-#             actual_len = len(input_ids)
-
-#         # =================================================
-#         # labels
-#         # prompt 不参与 loss
-#         # =================================================
-
-#         labels = (
-#             [-100] * prompt_len
-#             + target_ids_trunc
-#         )
-
-#         labels = labels[
-#             :self.config.block_size
-#         ]
-
-#         # =================================================
-#         # source tokens
-#         # Detection Metrics 使用
-#         # =================================================
-
-#         source_tokens = (
-#             [-100] * prompt_len
-#             + source_ids[:max_target_len]
-#         )
-
-#         source_tokens = source_tokens[
-#             :self.config.block_size
-#         ]
-
-#         # =================================================
-#         # confusion weights
-#         # 错误位置提高 loss 权重
-#         # m_idx 是原句字符索引，只在截断范围内有效
-#         # =================================================
-
-#         weights = [1.0] * len(labels)
-
-#         for m_idx in modified_indices:
-
-#             label_pos = prompt_len + m_idx
-
-#             if label_pos < len(weights):
-#                 weights[label_pos] = (
-#                     self.config.confusion_loss_weight
-#                 )
-
-#         # =================================================
-#         # Padding
-#         # =================================================
-
-#         padding_len = (
-#             self.config.block_size
-#             - actual_len
-#         )
-
-#         # input_ids
-#         input_ids += (
-#             [self.tokenizer.pad_token_id]
-#             * padding_len
-#         )
-
-#         # labels
-#         labels += (
-#             [-100]
-#             * padding_len
-#         )
-
-#         # source_tokens
-#         source_tokens += (
-#             [-100]
-#             * padding_len
-#         )
-
-#         # weights
-#         weights += (
-#             [1.0]
-#             * padding_len
-#         )
-
-#         # attention_mask
-#         attention_mask = (
-#             [1] * actual_len
-#             + [0] * padding_len
-#         )
-
-#         # =================================================
-#         # Return
-#         # =================================================
-
-#         return {
-
-#             "tokens": torch.tensor(
-#                 input_ids,
-#                 dtype=torch.long
-#             ),
-
-#             "targets": torch.tensor(
-#                 labels,
-#                 dtype=torch.long
-#             ),
-
-#             "source_tokens": torch.tensor(
-#                 source_tokens,
-#                 dtype=torch.long
-#             ),
-
-#             "confusion_weights": torch.tensor(
-#                 weights,
-#                 dtype=torch.float
-#             ),
-
-#             "attention_mask": torch.tensor(
-#                 attention_mask,
-#                 dtype=torch.long
-#             )
-#         }
-
+class InstructDataset(Dataset):
+    """
+    指令微调专用的 Dataset
+    格式：
+    任务：中文拼写纠错
+    错误类型：[形近错字/无错误]
+    请纠正句子中的错误：[原句]
+    """
+
+    def __init__(
+        self,
+        jsonl_data,
+        config: NanoLlamaConfig,
+        tokenizer: Tokenizer
+    ):
+        self.data = jsonl_data
+        self.config = config
+        self.tokenizer = tokenizer
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        item = self.data[idx]
+        source_text = item["source"]            
+        target_text = item["target"]            
+        error_type = item["error_type"]         
+        modified_indices = item["modified_indices"] 
+        has_error = item["has_error"]           
+
+        # =================================================
+        # 构造带有换行符的结构化 prompt
+        # =================================================
+        if has_error:
+            prompt_text = (
+                f"任务：中文拼写纠错\n"
+                f"错误类型：{error_type}\n"
+                f"请纠正句子中的错误：{source_text}"
+            )
+        else:
+            prompt_text = (
+                f"任务：中文拼写纠错\n"
+                f"错误类型：无错误\n"
+                f"请纠正句子中的错误：{source_text}"
+            )
+
+        # =================================================
+        # Tokenize
+        # =================================================
+        prompt_ids = self.tokenizer.encode(prompt_text, add_special_tokens=True)
+        prompt_len = len(prompt_ids)
+
+        target_ids = self.tokenizer.encode(target_text, add_special_tokens=False)
+        target_ids += [self.tokenizer.eos_token_id]
+
+        source_ids = self.tokenizer.encode(source_text, add_special_tokens=False)
+        source_ids += [self.tokenizer.eos_token_id]
+
+        # =================================================
+        # 截断策略
+        # =================================================
+        max_target_len = self.config.block_size - prompt_len - 1
+
+        if max_target_len < 1:
+            input_ids = prompt_ids[:self.config.block_size]
+            actual_len = len(input_ids)
+            target_ids_trunc = [] 
+        else:
+            target_ids_trunc = target_ids[:max_target_len]
+            full_ids = prompt_ids + target_ids_trunc
+            input_ids = full_ids[:self.config.block_size]
+            actual_len = len(input_ids)
+
+        # =================================================
+        # Labels 遮蔽机制 (Prompt 部分全置为 -100 不算 Loss)
+        # =================================================
+        labels = ([-100] * prompt_len + target_ids_trunc)[:self.config.block_size]
+        source_tokens = ([-100] * prompt_len + source_ids[:max_target_len])[:self.config.block_size]
+
+        # =================================================
+        # Confusion Weights (针对错误位置进行 Loss 惩罚放大)
+        # =================================================
+        weights = [1.0] * len(labels)
+        for m_idx in modified_indices:
+            label_pos = prompt_len + m_idx
+            if label_pos < len(weights):
+                weights[label_pos] = self.config.confusion_loss_weight
+
+        # =================================================
+        # Padding
+        # =================================================
+        padding_len = self.config.block_size - actual_len
+        input_ids += [self.tokenizer.pad_token_id] * padding_len
+        labels += [-100] * padding_len
+        source_tokens += [-100] * padding_len
+        weights += [1.0] * padding_len
+        attention_mask = [1] * actual_len + [0] * padding_len
+
+        return {
+            "tokens": torch.tensor(input_ids, dtype=torch.long),
+            "targets": torch.tensor(labels, dtype=torch.long),
+            "source_tokens": torch.tensor(source_tokens, dtype=torch.long),
+            "confusion_weights": torch.tensor(weights, dtype=torch.float),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long)
+        }

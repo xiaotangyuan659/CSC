@@ -1,3 +1,4 @@
+#生成静态微调数据集
 import os
 import json
 import random
@@ -79,12 +80,13 @@ def inject_error(sentence, confusion_set, max_errors=1):
     return True, "".join(chars), modified_indices
 
 def build_static_dataset_single_file(
-    target_file, 
-    confusion_path, 
-    output_file, 
+    target_file,
+    confusion_path,
+    output_file,
     error_type_name="SHAPE",
-    corruption_ratio=0.7, 
-    max_errors_per_sentence=1
+    corruption_ratio=0.7,
+    max_errors_per_sentence=1,
+    max_lines=None
 ):
     """
     只读取指定的单一 TXT 文件，构造离线数据集
@@ -101,46 +103,40 @@ def build_static_dataset_single_file(
     total_processed = 0
     total_corrupted = 0
     
-    # 每次运行覆盖写入，因为是测试用
+    # 每次运行覆盖写入
     with open(output_file, 'w', encoding='utf-8') as out_f:
         with open(target_file, 'r', encoding='utf-8') as in_f:
-            lines = in_f.readlines()
-            
-            for line in tqdm(lines, desc="Injecting Data"):
-                clean_text = line.strip()
-                if not clean_text:
-                    continue
-                    
-                total_processed += 1
-                
-                # 按照设定的概率决定是否注错
-                if random.random() < corruption_ratio:
-                    is_modified, error_text, modified_indices = inject_error(
-                        clean_text, 
-                        confusion_set, 
-                        max_errors=max_errors_per_sentence
-                    )
-                    
-                    if is_modified:
-                        total_corrupted += 1
-                        data_point = {
-                            "source": error_text,
-                            "target": clean_text,
-                            "error_type": error_type_name,
-                            "modified_indices": modified_indices,
-                            "has_error": True
-                        }
-                    else:
-                        # 注错失败作为负样本
-                        data_point = {
-                            "source": clean_text,
-                            "target": clean_text,
-                            "error_type": "NONE",
-                            "modified_indices": [],
-                            "has_error": False
-                        }
+            if max_lines is not None:
+                lines = [next(in_f) for _ in range(max_lines)]
+            else:
+                lines = in_f.readlines()
+
+        for line in tqdm(lines, desc="Injecting Data"):
+            clean_text = line.strip()
+            if not clean_text:
+                continue
+
+            total_processed += 1
+
+            # 按照设定的概率决定是否注错
+            if random.random() < corruption_ratio:
+                is_modified, error_text, modified_indices = inject_error(
+                    clean_text,
+                    confusion_set,
+                    max_errors=max_errors_per_sentence
+                )
+
+                if is_modified:
+                    total_corrupted += 1
+                    data_point = {
+                        "source": error_text,
+                        "target": clean_text,
+                        "error_type": error_type_name,
+                        "modified_indices": modified_indices,
+                        "has_error": True
+                    }
                 else:
-                    # 保持为正确样本 (负样本)
+                    # 注错失败作为负样本
                     data_point = {
                         "source": clean_text,
                         "target": clean_text,
@@ -148,34 +144,42 @@ def build_static_dataset_single_file(
                         "modified_indices": [],
                         "has_error": False
                     }
-                
-                out_f.write(json.dumps(data_point, ensure_ascii=False) + "\n")
+            else:
+                # 保持为正确样本 (负样本)
+                data_point = {
+                    "source": clean_text,
+                    "target": clean_text,
+                    "error_type": "NONE",
+                    "modified_indices": [],
+                    "has_error": False
+                }
 
-    print("\n" + "="*40)
+            out_f.write(json.dumps(data_point, ensure_ascii=False) + "\n")
+
     print("单文件数据离线构造完成！")
     print(f"总处理句子数: {total_processed}")
     print(f"成功注入错误的句子数: {total_corrupted}")
     print(f"数据已保存至: {output_file}")
-    print("="*40)
 
 
 if __name__ == "__main__":
-    # 1. 你的单文件路径
-    TARGET_FILE = r"D:\大三下课程\NLP\CSC\data\cleaned\part-663de978334d-000000.txt"  
-    
-    # 2. 混淆集路径
-    CONFUSION_PATH = r"D:\大三下课程\NLP\CSC\data\confusion\shape_confusion_filtered.json" 
-    
-    # 3. 输出的验证用小数据集
-    OUTPUT_FILE = r"D:\大三下课程\NLP\CSC\data\mini_train_data.jsonl"
-    
+    # 读取文件路径（取前10万条）
+    TARGET_FILE = r"D:\大三下课程\NLP\CSC\data\cleaned\part-663de978334d-000006.txt"
+
+    # 混淆集路径
+    CONFUSION_PATH = r"D:\大三下课程\NLP\CSC\data\confusion\shape_confusion_filtered.json"
+
+    # 输出路径
+    OUTPUT_FILE = r"D:\大三下课程\NLP\CSC\data\confusion\SFT_shape_confusion.jsonl"
+
     build_static_dataset_single_file(
         target_file=TARGET_FILE,
         confusion_path=CONFUSION_PATH,
         output_file=OUTPUT_FILE,
         error_type_name="形近错字",
-        corruption_ratio=0.7,      
-        max_errors_per_sentence=1  
+        corruption_ratio=0.7,
+        max_errors_per_sentence=1,
+        max_lines=100000
     )
 
 

@@ -48,12 +48,6 @@ class NanoLlamaConfig:
     # 错误位置 loss 放大权重
     confusion_loss_weight: float = 10.0
 
-    # 错误注入比例
-    error_rate: float = 0.35
-
-    # 负样本比例
-    no_error_ratio: float = 0.3
-
     # =========================================
     # Device
     # =========================================
@@ -74,14 +68,27 @@ class NanoLlamaConfig:
 
     checkpoint_dir: str = "out"
 
+
     # =========================================
-    # 混淆集
+    # SFT 微调专属参数 (新增)
     # =========================================
 
-    shape_confusion_path: str = (
-        r"D:\大三下课程\NLP\CSC\data\confusion\shape_confusion_filtered.json"
-    )
+    # 1. 预训练权重路径 
+    # 也就是你刚才跑出来的 loss 在 3 左右的那个权重文件
+    # 请把这里的 X 替换为你实际跑出来的最好的 epoch 编号
+    pretrained_path: str = r"D:\大三下课程\NLP\CSC\out\epoch3_step240000.pt"  
 
-    phonetic_dir: str = (
-        r"D:\大三下课程\NLP\CSC\data\confusion\phonetic_confusion_filtered"
-    )
+    # 2. SFT 阶段的模型输出目录
+    # 换一个新的文件夹，绝对不能和预训练的 out 目录混在一起，防止覆盖辛辛苦苦跑出来的权重
+    sft_checkpoint_dir: str = "out_sft"
+
+    # 3. 构造的 10 万条监督微调数据路径
+    # 请替换为你实际存放这 10 万条数据的本地绝对路径
+    sft_data_path: str = r"D:\大三下课程\NLP\CSC\data\confusion\SFT_shape_confusion.jsonl"
+
+    # 4. SFT 阶段专属超参数
+    # SFT 的学习率必须比预训练小（通常下降一个数量级），以防止模型发生“灾难性遗忘”，忘掉预训练学到的基础语言能力
+    sft_learning_rate: float = 5e-5  
+    
+    # 相比预训练，SFT 通常不需要跑太多轮，防止在特定的纠错格式上严重过拟合
+    sft_epochs: int = 3
