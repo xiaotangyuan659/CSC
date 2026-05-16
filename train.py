@@ -12,43 +12,10 @@ from torch.cuda.amp import GradScaler, autocast
 
 from config import NanoLlamaConfig
 from model import NanoLlama
-from dataset import SFTDataset, Tokenizer,PretrainDataset
+from dataset import SFTDataset, Tokenizer, PretrainDataset
 from src.evaluate import evaluate
+import math
 
-
-# def load_single_shard(directory_pah, max_samples=None):
-#     """
-#     仅加载第一个分片文件进行快速测试
-#     """
-
-#     file_list = glob.glob(os.path.join(directory_path, "*"))
-
-#     if not file_list:
-#         return []
-
-#     file_list.sort()
-
-#     first_shard = file_list[0]
-
-#     print(f"核心测试模式：正在加载第一个分片: {os.path.basename(first_shard)}")
-
-#     all_texts = []
-
-#     with open(first_shard, 'r', encoding='utf-8') as f:
-
-#         for i, line in enumerate(f):
-
-#             content = line.strip()
-
-#             if content:
-#                 all_texts.append(content)
-
-#             if max_samples and len(all_texts) >= max_samples:
-#                 break
-
-#     print(f"已加载 {len(all_texts)} 条测试数据。")
-
-#     return all_texts
 
 def load_jsonl_dataset(file_path):
     print(f"正在加载离线静态数据集: {file_path}")
@@ -62,7 +29,7 @@ def load_jsonl_dataset(file_path):
     return data
 
 def load_pretrain_corpus(file_path):
-    print(f"正在加载预训练正确的纯文本数据: {file_path}")
+    print(f"正在加载预训练纯文本数据: {file_path}")
     data = []
     with open(file_path, 'r', encoding='utf-8') as f:
         for line in f:
@@ -71,6 +38,25 @@ def load_pretrain_corpus(file_path):
                 data.append(content)
     print(f"已加载 {len(data)} 条纯文本数据。")
     return data
+
+
+def load_all_shards(shard_dir, prefix="part-663de978334d-000"):
+    """从目录加载所有指定前缀的分片文件，按序号排序后合并"""
+    import re
+    all_texts = []
+    shard_files = glob.glob(os.path.join(shard_dir, f"{prefix}*.txt"))
+    shard_files.sort(key=lambda x: int(re.search(r'(\d+)', os.path.basename(x)).group(1)))
+    print(f"找到 {len(shard_files)} 个分片文件:")
+    for f in shard_files:
+        print(f"  {os.path.basename(f)}")
+    for shard_file in shard_files:
+        with open(shard_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                content = line.strip()
+                if content:
+                    all_texts.append(content)
+    print(f"共加载 {len(all_texts)} 条数据。")
+    return all_texts
 
 
 def train():
@@ -95,10 +81,9 @@ def train():
     # dataset_data = load_jsonl_dataset(jsonl_path)[:10000]  # 只取前10万条
     # dataset = SFTDataset(dataset_data, config, tokenizer)
 
-    # 加载预训练数据
-    # 
-    txt_path = r"D:\大三下课程\NLP\CSC\data\cleaned\part-663de978334d-000000.txt"
-    dataset_data = load_pretrain_corpus(txt_path)[:10000] # 测试时先取前1万条
+    # 加载预训练数据（所有分片，000~019）
+    corpus_dir = r"D:\大三下课程\NLP\CSC\data\cleaned"
+    dataset_data = load_all_shards(corpus_dir, prefix="part-663de978334d-000")
     dataset = PretrainDataset(dataset_data, config, tokenizer)
 
     # corpus_dir = r"D:\大三下课程\NLP\CSC\data\cleaned"
@@ -184,11 +169,70 @@ def train():
         enabled=(device == "cuda")
     )
 
+    
+    # 学习率调度：Warmup + Cosine 衰减
+    # warmup_steps: 线性预热步数（推荐总步数的 0.5%~1%）
+    # total_steps:  全部训练步数（按数据量估算）
+
+    WARMUP_STEPS = 500          # 前 500 步线性预热
+    TOTAL_STEPS = len(train_loader) * config.epochs  # 总步数估算
+
+    def lr_lambda(current_step):
+        if current_step < WARMUP_STEPS:
+            return float(current_step) / float(max(1, WARMUP_STEPS))
+        progress = float(current_step - WARMUP_STEPS) / float(max(1, TOTAL_STEPS - WARMUP_STEPS))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
     # =========================================
     # 梯度累加（物理batch不够大时用）
-    # 物理 batch * accum_steps = 等效 batch
+    # batch_size=32, accum=4 → 等效 batch=128
     # =========================================
-    ACCUM_STEPS = 4  # 物理batch=32, 等效=128; 按显存调整，显存够用可调为2甚至1
+    ACCUM_STEPS = 4
+
+    # =========================================
+    # 断点续训：自动查找最新 checkpoint 并恢复
+    # =========================================
+    start_epoch = 0
+    global_step = 0
+
+    checkpoint_files = glob.glob(os.path.join(config.checkpoint_dir, "nanollama_epoch_*.pt")) + \
+                       glob.glob(os.path.join(config.checkpoint_dir, "epoch*_step*.pt"))
+
+    if checkpoint_files:
+        # 按修改时间取最新的
+        latest_ckpt = max(checkpoint_files, key=os.path.getmtime)
+        print(f"\n发现已有 checkpoint: {latest_ckpt}")
+        print(f"正在加载权重")
+        ckpt = torch.load(latest_ckpt, map_location=device)
+
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        scaler.load_state_dict(ckpt.get("scaler_state_dict", scaler.state_dict()))
+
+        # 尝试恢复 scheduler 状态
+        if "scheduler_state_dict" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+        # 从文件名或 checkpoint 内部恢复 epoch/step 信息
+        fname = os.path.basename(latest_ckpt)
+        if "epoch" in fname and "_step" in fname:
+            # mid-epoch checkpoint: epochN_stepM.pt
+            parts = fname.replace(".pt", "").split("_")
+            start_epoch = int(parts[0].replace("epoch", "")) - 1
+            global_step = int(parts[1].replace("step", ""))
+            print(f"从 epoch {start_epoch+1} step {global_step} 继续训练（已跳过 {global_step} 步）")
+        elif "epoch" in fname:
+            # epoch-end checkpoint: nanollama_epoch_N.pt
+            start_epoch = int(fname.replace(".pt", "").split("_")[-1])
+            print(f"已完成 {start_epoch} 个 epoch，从 epoch {start_epoch+1} 继续训练")
+            global_step = start_epoch * len(train_loader)
+
+        print("权重加载完成\n")
+    else:
+        print("未发现已有 checkpoint，从头开始训练\n")
+
     optimizer.zero_grad(set_to_none=True)
 
     # =========================
@@ -200,18 +244,23 @@ def train():
 
     # 在外层包上 try...except，捕捉 Ctrl+C 中断
     try:
-        for epoch in range(config.epochs):
+        for epoch in range(start_epoch, config.epochs):
 
             epoch_loss = 0
 
             t0 = time.time()
 
             for step, batch in enumerate(train_loader):
+                current_step = epoch * len(train_loader) + step
+
+                # 跳过已训练过的 steps（断点续训时）
+                if current_step < global_step:
+                    continue
 
                 # (Debug 代码保持不变)
                 if step == 0 and epoch == 0:
                     debug_lines = []
-                    debug_lines.append("\n========== [DEBUG] 第一个 Batch 内容 ==========")
+                    debug_lines.append("\n第一个 Batch 内容")
                     tokens = batch["tokens"]
                     targets = batch["targets"]
                     source_tokens = batch["source_tokens"]
@@ -247,9 +296,8 @@ def train():
                     "confusion_weights"
                 ].to(device)
 
-                # =========================
+            
                 # Forward (AMP + 梯度累加)
-                # =========================
                 with autocast(enabled=(device == "cuda")):
 
                     logits, loss = model(
@@ -277,39 +325,42 @@ def train():
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
+                    scheduler.step()
 
                 epoch_loss += loss.item()
 
-                # =========================
+            
                 # 日志、验证与步数保存
-                # =========================
+                # 1. 常规进度打印 (每 10000 步打印一次 Loss，不会刷屏也能看进度)
+                if step % 10000 == 0 and step > 0:
+                    current_lr = scheduler.get_last_lr()[0]
+                    print(f"Epoch {epoch+1} | Step {current_step}/{TOTAL_STEPS} | Loss {loss.item():.4f} | LR {current_lr:.2e}")
 
-                # 1. 常规进度打印 (每 500 步打印一次 Loss，不会刷屏也能看进度)
-                if step % 500 == 0 and step > 0:
-                    print(f"Epoch {epoch+1} | Step {step}/{len(train_loader)} | Loss {loss.item():.4f}")
-
-                # 2. 中途验证 & 自动保存 (每 2000 步)
-                if step % 2000 == 0 and step > 0:
+                # 2. 中途验证 & 自动保存 (每 20000 步，约每 epoch 保存一次)
+                # 使用 current_step 确保断点续训后不受 local step 初始值影响
+                if current_step > 0 and current_step % 25000 == 0:
                     print("\n[开始中途验证...]")
                     metrics = evaluate(model, val_loader, device)
                     print(f"Val Loss: {metrics['val_loss']:.4f} ")
                     model.train()  # 别忘了切回训练模式
 
                     # 新增：步数自动保存临时档
-                    temp_path = os.path.join(config.checkpoint_dir, f"epoch{epoch+1}_step{step}.pt")
+                    temp_path = os.path.join(config.checkpoint_dir, f"epoch{epoch+1}_step{current_step}.pt")
                     torch.save(
                         {
                             "model_state_dict": model.state_dict(),
                             "optimizer_state_dict": optimizer.state_dict(),
-                            "metrics": metrics
+                            "scheduler_state_dict": scheduler.state_dict(),
+                            "scaler_state_dict": scaler.state_dict(),
+                            "metrics": metrics,
+                            "global_step": current_step,
                         },
                         temp_path
                     )
                     print(f"进度已保存至: {temp_path}\n")
 
-            # =========================
+
             # Epoch 结束后的常规保存
-            # =========================
             avg_loss = epoch_loss / len(train_loader)
 
             elapsed = time.time() - t0
@@ -341,8 +392,11 @@ def train():
                     "epoch": epoch + 1,
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "scaler_state_dict": scaler.state_dict(),
                     "train_loss": avg_loss,
                     "metrics": metrics,
+                    "global_step": (epoch + 1) * len(train_loader),
                 },
                 checkpoint_path
             )
@@ -359,6 +413,8 @@ def train():
             {
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "scaler_state_dict": scaler.state_dict(),
                 "note": "Interrupted by user"
             },
             emergency_path

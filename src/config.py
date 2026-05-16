@@ -5,21 +5,20 @@ import torch
 @dataclass
 class NanoLlamaConfig:
 
-    # =========================================
-    # 模型结构
-    # =========================================
+    
+    # 模型参数
 
     block_size: int = 256
 
     vocab_size: int = 8282
 
-    n_layer: int = 8
+    n_layer: int = 12
 
-    n_head: int = 8
+    n_head: int = 12
 
-    n_embd: int = 384
+    n_embd: int = 960
 
-    intermediate_size: int = 1024
+    intermediate_size: int = 2560
 
     dropout: float = 0.1
 
@@ -27,9 +26,8 @@ class NanoLlamaConfig:
 
     eps: float = 1e-5
 
-    # =========================================
+ 
     # 训练参数
-    # =========================================
 
     batch_size: int = 32
 
@@ -41,16 +39,13 @@ class NanoLlamaConfig:
 
     epochs: int = 5
 
-    # =========================================
+
     # CSC 关键参数
-    # =========================================
 
     # 错误位置 loss 放大权重
     confusion_loss_weight: float = 10.0
 
-    # =========================================
     # Device
-    # =========================================
 
     device: str = (
         "cuda"
@@ -58,9 +53,7 @@ class NanoLlamaConfig:
         else "cpu"
     )
 
-    # =========================================
     # 路径
-    # =========================================
 
     vocab_path: str = (
         r"D:\大三下课程\NLP\CSC\src\vocab.txt"
@@ -68,15 +61,12 @@ class NanoLlamaConfig:
 
     checkpoint_dir: str = "out"
 
-
-    # =========================================
     # SFT 微调专属参数 (新增)
-    # =========================================
 
     # 1. 预训练权重路径 
     # 也就是你刚才跑出来的 loss 在 3 左右的那个权重文件
     # 请把这里的 X 替换为你实际跑出来的最好的 epoch 编号
-    pretrained_path: str = r"D:\大三下课程\NLP\CSC\out\epoch3_step240000.pt"  
+    pretrained_path: str = ""  
 
     # 2. SFT 阶段的模型输出目录
     # 换一个新的文件夹，绝对不能和预训练的 out 目录混在一起，防止覆盖辛辛苦苦跑出来的权重
